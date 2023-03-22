@@ -2,7 +2,7 @@
 
 # Branch
   - Wav - 주영, 송민
-  - Text - 대호, 준두 *
+  - Text - 대호, 준두
   - main - 건드리지말고 회의하면서 merge하는걸로
 
 
