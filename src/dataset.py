@@ -5,6 +5,8 @@ import torch
 from torch.utils.data import Dataset
 
 from src.kobert_tokenizer import KoBertTokenizer
+import torchaudio
+from transformers import Wav2Vec2Processor,Wav2Vec2CTCTokenizer, Wav2Vec2FeatureExtractor
 
 
 class KEMDyDataset(Dataset):
@@ -24,7 +26,16 @@ class KEMDyDataset(Dataset):
 
         self.sess_seg = []
 
-        self.tokenizer = KoBertTokenizer.from_pretrained('monologg/kobert')
+        if modal=='text':
+            self.tokenizer = KoBertTokenizer.from_pretrained('monologg/kobert')
+        if modal=='wav':    
+            model_name_or_path = "kresnik/wav2vec2-large-xlsr-korean"
+            self.wav_tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(model_name_or_path)
+            self.wav_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name_or_path)
+            # self.processor = Wav2Vec2Processor(feature_extractor=self.wav_feature_extractor, tokenizer=self.wav_tokenizer)
+            self.processor = Wav2Vec2Processor.from_pretrained(model_name_or_path)
+            self.target_sampling_rate = self.processor.feature_extractor.sampling_rate
+            print(f"The target sampling rate: {self.target_sampling_rate}")
 
         # Session Validation
         if kind == 'train':
@@ -36,6 +47,7 @@ class KEMDyDataset(Dataset):
             self.load_data(index)
 
     def load_data(self, index):
+        sound = []
         sentence = []
         labels = []
 
@@ -65,6 +77,9 @@ class KEMDyDataset(Dataset):
                             sentence.append(file.readline().strip())
 
                     # Load Audio ...
+                    if self.modal == 'wav':
+                        sound.append(self.speech_file_to_array_fn(f'{self.path}/{session}/{segment}.wav'))
+                    
 
         self.label = torch.tensor(labels)
 
@@ -72,13 +87,33 @@ class KEMDyDataset(Dataset):
             self.data, self.mask = self.tokenize(sentence)
             print(self.data.shape, self.mask.shape, self.label.shape)
 
+        if self.modal == 'wav':
+            # results = self.wav_feature_extractor(sound, sampling_rate=self.target_sampling_rate, padding='max_length', return_attention_mask=True)
+            results = self.processor(sound, sampling_rate=self.target_sampling_rate, padding="max_length", max_length=512, truncation=True)
+            self.data = torch.tensor(results['input_values'])
+            self.mask = torch.tensor(results['attention_mask'])
+            print(self.data.shape, self.mask.shape, self.label.shape)
+            
+        return     
     def tokenize(self, sentence):
         encode = self.tokenizer.batch_encode_plus(sentence, truncation=True, padding='max_length')
 
         return torch.tensor(encode['input_ids']), torch.tensor(encode['attention_mask'])
 
+    
+    def speech_file_to_array_fn(self, path):
+        speech_array, sampling_rate = torchaudio.load(path)
+        resampler = torchaudio.transforms.Resample(sampling_rate, self.target_sampling_rate)
+        speech = resampler(speech_array).squeeze().numpy()
+        return speech
+
+
+
     def __getitem__(self, index):
         if self.modal == 'text':
+            data, mask, label = self.data[index], self.mask[index], self.label[index]
+            return data, mask, label
+        if self.modal == 'wav':
             data, mask, label = self.data[index], self.mask[index], self.label[index]
             return data, mask, label
 

@@ -10,11 +10,16 @@ from src.dataset import KEMDyDataset
 
 # Model
 from module.KoBertEmotionRecognition import KoBERTEmotionRecognition
+from module.Wav2VecEmotionRecognition import Wav2VecEmotionRecognition
 
 from torchnet import meter
 from sklearn.metrics import f1_score, recall_score, precision_score, accuracy_score
 
 from src.util import out_put
+
+from transformers import AutoConfig
+
+import wandb
 
 
 def train(modal, k, l_type, epochs, lr, decay, batch_size, file_name, use_gpu=False):
@@ -22,6 +27,7 @@ def train(modal, k, l_type, epochs, lr, decay, batch_size, file_name, use_gpu=Fa
         device = torch.device('cuda')
     else:
         device = torch.device('cpu')
+    print(device)
 
     directory = file_name.split('/')[-2]
     if not os.path.exists(f'./results/{modal}/' + directory):
@@ -30,16 +36,26 @@ def train(modal, k, l_type, epochs, lr, decay, batch_size, file_name, use_gpu=Fa
     train_data = KEMDyDataset(modal=modal, k=k, kind='train', l_type=l_type)
     val_data = KEMDyDataset(modal=modal, k=k, kind='val', l_type=l_type)
 
+
     train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
 
     # Model Init
     if modal == 'text':
         model = KoBERTEmotionRecognition().to(device)
+    if modal == 'wav':
+        model_name_or_path = "kresnik/wav2vec2-large-xlsr-korean"
+        config = AutoConfig.from_pretrained(model_name_or_path,
+                                            num_labels=7,
+                                            label2id = {'neutral': 0, 'happy': 1, 'surprise': 2, 'angry': 3, 'sad': 4, 'disqust': 5, 'fear': 6},
+                                            id2label = {0: 'neutral', 1: 'happy', 2: 'surprise', 3: 'angry', 4: 'sad', 5: 'disqust', 6: 'fear'}
+                                            )
+
+        model = Wav2VecEmotionRecognition.from_pretrained(model_name_or_path, config=config).to(device)
 
     # Optimization Settings
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=decay)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=decay)
 
     # meters
     loss_meter = meter.AverageValueMeter()
@@ -74,6 +90,8 @@ def train(modal, k, l_type, epochs, lr, decay, batch_size, file_name, use_gpu=Fa
 
         pred_label = torch.cat(pred_label, 0)
         true_label = torch.cat(true_label, 0)
+        
+        assert(pred_label.shape == true_label.shape)        # test
 
         train_f1 = f1_score(true_label, pred_label, average='weighted')
         train_accuracy = accuracy_score(true_label, pred_label)
@@ -85,14 +103,20 @@ def train(modal, k, l_type, epochs, lr, decay, batch_size, file_name, use_gpu=Fa
                 '| train F1: ' + str(train_f1) + '| train Accuracy: ' + str(train_accuracy) +
                 '| train Precision: ' + str(train_precision) + '| train Recall: ' + str(train_recall),
                 file_name)
-
-        val_f1, val_accuracy, val_precision, val_recall = val(model, val_loader, use_gpu)
+        wandb.log({'train_loss': loss_meter.value()[0],
+                   'train F1': train_f1}, 
+                   step=epoch)
+        val_loss, val_f1, val_accuracy, val_precision, val_recall = val(model, val_loader, use_gpu)
 
         out_put('Epoch: ' + 'val' + str(epoch) +
                 '| val F1: ' + str(val_f1) + '| val Accuracy: ' + str(val_accuracy) +
                 '| val Precision: ' + str(val_precision) + '| val Recall: ' + str(val_recall),
                 file_name)
-
+        
+        wandb.log({'valid_loss': val_loss,
+                   'valid F1': val_f1},
+                   step=epoch)
+        
         if val_f1 >= best_f1:
             best_f1 = val_f1
             best_epoch = epoch
@@ -114,12 +138,17 @@ def val(model, dataloader, use_gpu):
 
     pred_label = []
     true_label = []
+    
+    criterion = nn.CrossEntropyLoss()
+    loss_meter = meter.AverageValueMeter()
 
     for ii, (data, mask, target) in enumerate(dataloader):
         data, mask = data.to(device), mask.to(device)
         target = target.to(device)
 
         output = model(data, mask)
+        loss = criterion(output, target)
+        loss_meter.add(loss.item())
 
         _, pred = output.data.topk(1, dim=1)
         pred = pred.t().squeeze()
@@ -130,6 +159,7 @@ def val(model, dataloader, use_gpu):
     pred_label = torch.cat(pred_label, 0)
     true_label = torch.cat(true_label, 0)
 
+
     val_f1 = f1_score(true_label, pred_label, average='weighted')
     val_accuracy = accuracy_score(true_label, pred_label)
     val_precision = precision_score(true_label, pred_label, average='weighted')
@@ -137,5 +167,5 @@ def val(model, dataloader, use_gpu):
 
     model.train()
 
-    return val_f1, val_accuracy, val_precision, val_recall
+    return loss_meter.value()[0], val_f1, val_accuracy, val_precision, val_recall
 
